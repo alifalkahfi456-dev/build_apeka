@@ -1,0 +1,143 @@
+name: Flutter Build Bot
+
+on:
+  # Dipanggil oleh Telegram bot via API
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Tipe build: apk-debug | apk-release | aab-release'
+        required: false
+        default: 'apk-debug'
+        type: choice
+        options:
+          - apk-debug
+          - apk-release
+          - aab-release
+
+  # Otomatis jalan setiap kali ada push ke branch main
+  push:
+    branches:
+      - main
+    paths:
+      - 'lib/**'
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+      - 'android/**'
+      - 'assets/**'
+
+jobs:
+  build:
+    name: Build Flutter App
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ── 1. Checkout repo ──────────────────────────────────────────────────
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # ── 2. Setup Java (dibutuhin Flutter Android build) ──────────────────
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      # ── 3. Setup Flutter ──────────────────────────────────────────────────
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'   # Ganti sesuai versi project lu
+          channel: 'stable'
+          cache: true
+
+      # ── 4. Tentukan tipe build ────────────────────────────────────────────
+      - name: Set Build Type
+        id: build_info
+        run: |
+          BUILD_TYPE="${{ github.event.inputs.build_type }}"
+          # Default ke apk-debug kalau push (bukan dispatch)
+          if [ -z "$BUILD_TYPE" ]; then
+            BUILD_TYPE="apk-debug"
+          fi
+          echo "build_type=$BUILD_TYPE" >> $GITHUB_OUTPUT
+          echo "🏗️ Build type: $BUILD_TYPE"
+
+      # ── 5. Get dependencies ───────────────────────────────────────────────
+      - name: Flutter Pub Get
+        run: flutter pub get
+
+      # ── 6. Build APK Debug ────────────────────────────────────────────────
+      - name: Build APK Debug
+        if: steps.build_info.outputs.build_type == 'apk-debug'
+        run: |
+          flutter build apk --debug \
+            --no-shrink \
+            --target-platform android-arm,android-arm64,android-x64
+          echo "✅ APK Debug selesai"
+
+      # ── 7. Build APK Release ──────────────────────────────────────────────
+      - name: Build APK Release
+        if: steps.build_info.outputs.build_type == 'apk-release'
+        run: |
+          flutter build apk --release \
+            --obfuscate \
+            --split-debug-info=build/debug-info \
+            --target-platform android-arm,android-arm64,android-x64
+          echo "✅ APK Release selesai"
+
+      # ── 8. Build AAB Release ──────────────────────────────────────────────
+      - name: Build AAB Release
+        if: steps.build_info.outputs.build_type == 'aab-release'
+        run: |
+          flutter build appbundle --release \
+            --obfuscate \
+            --split-debug-info=build/debug-info
+          echo "✅ AAB Release selesai"
+
+      # ── 9. Rename & pindahin output ke satu folder ────────────────────────
+      - name: Prepare Output Files
+        run: |
+          mkdir -p output
+          BUILD_TYPE="${{ steps.build_info.outputs.build_type }}"
+          TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+          APP_NAME=$(grep '^name:' pubspec.yaml | awk '{print $2}' | tr -d '\r')
+
+          if [ "$BUILD_TYPE" = "apk-debug" ]; then
+            APK_PATH=$(find build/app/outputs/flutter-apk -name "*.apk" | head -1)
+            cp "$APK_PATH" "output/${APP_NAME}_debug_${TIMESTAMP}.apk"
+
+          elif [ "$BUILD_TYPE" = "apk-release" ]; then
+            APK_PATH=$(find build/app/outputs/flutter-apk -name "app-release.apk" | head -1)
+            cp "$APK_PATH" "output/${APP_NAME}_release_${TIMESTAMP}.apk"
+
+          elif [ "$BUILD_TYPE" = "aab-release" ]; then
+            AAB_PATH=$(find build/app/outputs/bundle/release -name "*.aab" | head -1)
+            cp "$AAB_PATH" "output/${APP_NAME}_release_${TIMESTAMP}.aab"
+          fi
+
+          echo "📦 Output files:"
+          ls -lh output/
+
+      # ── 10. Upload artifact ke GitHub ─────────────────────────────────────
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-build-${{ steps.build_info.outputs.build_type }}-${{ github.run_number }}
+          path: output/
+          retention-days: 3     # Simpan 3 hari, hemat storage
+          if-no-files-found: error
+
+      # ── 11. Summary ───────────────────────────────────────────────────────
+      - name: Build Summary
+        if: always()
+        run: |
+          echo "## 🏗️ Flutter Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Type | ${{ steps.build_info.outputs.build_type }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Run Number | #${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Triggered By | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
+          
